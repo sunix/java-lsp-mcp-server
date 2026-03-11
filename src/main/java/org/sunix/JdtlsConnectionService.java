@@ -2,6 +2,7 @@ package org.sunix;
 
 import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParseResult;
+import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.ConstructorDeclaration;
@@ -15,6 +16,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.PathMatcher;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Logger;
@@ -33,9 +35,15 @@ public class JdtlsConnectionService {
 
     private static final Logger LOG = Logger.getLogger(JdtlsConnectionService.class.getName());
 
-    private final JavaParser javaParser = new JavaParser();
+    private final JavaParser javaParser;
     private boolean initialized = false;
     private String currentWorkspaceRoot;
+
+    public JdtlsConnectionService() {
+        ParserConfiguration config = new ParserConfiguration();
+        config.setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17);
+        this.javaParser = new JavaParser(config);
+    }
 
     public boolean isInitialized() {
         return initialized;
@@ -218,6 +226,7 @@ public class JdtlsConnectionService {
         if (currentWorkspaceRoot == null) {
             return List.of();
         }
+        PathMatcher matcher = Path.of(currentWorkspaceRoot).getFileSystem().getPathMatcher("glob:**.java");
         List<Path> files = new ArrayList<>();
         String[] sourceDirs = {
             "src/main/java", "src/test/java", "src"
@@ -226,7 +235,8 @@ public class JdtlsConnectionService {
             Path srcDir = Path.of(currentWorkspaceRoot, dir);
             if (Files.isDirectory(srcDir)) {
                 try (Stream<Path> walk = Files.walk(srcDir)) {
-                    walk.filter(p -> p.toString().endsWith(".java"))
+                    walk.filter(Files::isRegularFile)
+                        .filter(matcher::matches)
                         .forEach(files::add);
                 } catch (IOException e) {
                     LOG.warning("Error scanning " + srcDir + ": " + e.getMessage());
