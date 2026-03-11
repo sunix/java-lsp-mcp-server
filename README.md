@@ -4,13 +4,13 @@ A Model Context Protocol (MCP) server that exposes Java language analysis functi
 
 ## 🚧 Work in Progress
 
-This project is currently under active development. In-process Java analysis is implemented using JavaParser and ready for use.
+This project is currently under active development. In-process Java analysis is implemented using Eclipse JDT Core APIs and ready for use.
 
 ## ✅ What's Been Implemented
 
 ### Core Infrastructure
 - **Quarkus-based MCP Server** – HTTP transport for MCP protocol communication
-- **In-process Java Analysis** – JavaParser-based parsing, diagnostics and symbol extraction running inside the same JVM (no external process needed)
+- **In-process Java Analysis** – Eclipse JDT Core-based parsing, diagnostics and symbol extraction running inside the same JVM (no external process needed)
 - **Workspace Management** – Smart detection and initialization of Java projects (Maven/Gradle)
 - **Test Java Project** – Complete sample project in `test-workspace/` for testing
 
@@ -26,12 +26,12 @@ This project is currently under active development. In-process Java analysis is 
 | `getTestWorkspacePath()` | Get path to the default test workspace | ✅ Working |
 
 ### In-process Java Analysis (Hybrid Approach)
-Instead of spawning a separate JDTLS process, all Java analysis runs **in the same JVM** using [JavaParser](https://javaparser.org/):
+Instead of spawning a separate JDTLS process, all Java analysis runs **in the same JVM** using [Eclipse JDT Core](https://www.eclipse.org/jdt/core/) — the same compiler and AST APIs that power Eclipse IDE and JDTLS:
 - **No external installation** – no JDTLS download or configuration needed
 - **Always available** – no start/stop lifecycle; the analysis service is ready immediately
-- **Syntax diagnostics** – parse errors and warnings reported per file
-- **Symbol extraction** – classes, interfaces, enums, methods, fields, constructors
-- **Incremental design** – more features (type resolution, code completion, refactoring) can be added over time using the same in-process approach
+- **Compiler-level diagnostics** – the Eclipse Java compiler reports syntax errors, type errors, and warnings with line numbers
+- **Symbol extraction** – classes, interfaces, enums, methods, fields, constructors via the JDT DOM AST
+- **Incremental design** – more features (type resolution with classpath, code completion, refactoring) can be added over time using the same JDT Core APIs
 
 ### Test Workspace
 - **Location**: `test-workspace/`
@@ -68,7 +68,7 @@ mvn quarkus:dev
    → "Workspace initialized: /path/to/test-workspace (Maven project). Found 1 Java source file(s)."
 
 2. checkJdtls()
-   → "Java analysis service running (in-process). Workspace: /path/to/test-workspace. Java files: 1."
+   → "Java analysis service running (in-process, JDT Core). Workspace: /path/to/test-workspace. Java files: 1."
 
 3. getDiagnostics("src/main/java/com/example/Calculator.java")
    → "No issues found in: Calculator.java"
@@ -137,7 +137,7 @@ java-lsp-mcp-server/
 ├── pom.xml                           # Main project configuration (Java 17)
 ├── src/main/java/org/sunix/
 │   ├── MyTool.java                   # MCP tool implementations
-│   └── JdtlsConnectionService.java   # In-process Java analysis service
+│   └── JdtlsConnectionService.java   # In-process Java analysis (JDT Core APIs)
 ├── src/main/resources/
 │   └── application.properties        # Configuration
 ├── src/test/java/org/sunix/
@@ -176,7 +176,7 @@ This is an active WIP project. Current focus areas:
 ## 📚 References
 
 - [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) – Protocol for AI-tool communication
-- [JavaParser](https://javaparser.org/) – Java source code parser and AST library
+- [Eclipse JDT Core](https://www.eclipse.org/jdt/core/) – Java compiler and AST APIs (same as Eclipse IDE)
 - [Quarkus MCP Server](https://docs.quarkiverse.io/quarkus-mcp-server/dev/) – Quarkus extension for MCP servers
 
 ---

@@ -156,6 +156,10 @@ class JdtlsConnectionServiceTest {
             String result = service.getDiagnostics(tmpFile.toString());
             assertTrue(result.contains("issue"),
                     "Expected issues for broken file, got: " + result);
+            assertTrue(result.contains("ERROR") || result.contains("WARNING"),
+                    "JDT Core should report ERROR or WARNING, got: " + result);
+            assertTrue(result.contains("line"),
+                    "JDT Core should report line numbers, got: " + result);
         } finally {
             Files.deleteIfExists(tmpFile);
         }
@@ -246,6 +250,26 @@ class JdtlsConnectionServiceTest {
             Files.delete(tmpDir.resolve("pom.xml"));
             Files.delete(tmpDir);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // parseSource (JDT Core ASTParser)
+    // -------------------------------------------------------------------------
+
+    @Test
+    void parseSourceReturnsCompilationUnit() {
+        String source = "package test; public class Foo { public void bar() {} }";
+        var cu = service.parseSource(source.toCharArray(), "Foo.java");
+        assertNotNull(cu, "parseSource should return a CompilationUnit");
+        assertEquals(0, cu.getProblems().length, "Valid source should have no problems");
+    }
+
+    @Test
+    void parseSourceReportsProblemsForBadCode() {
+        String source = "public class Broken { public void broken( { } }";
+        var cu = service.parseSource(source.toCharArray(), "Broken.java");
+        assertNotNull(cu, "parseSource should return a CompilationUnit even for broken code");
+        assertTrue(cu.getProblems().length > 0, "Should report problems for broken code");
     }
 
     // -------------------------------------------------------------------------

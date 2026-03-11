@@ -1,16 +1,9 @@
 package org.sunix;
 
-import com.github.javaparser.JavaParser;
-import com.github.javaparser.ParseResult;
-import com.github.javaparser.ParserConfiguration;
-import com.github.javaparser.ast.CompilationUnit;
-import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
-import com.github.javaparser.ast.body.ConstructorDeclaration;
-import com.github.javaparser.ast.body.EnumDeclaration;
-import com.github.javaparser.ast.body.FieldDeclaration;
-import com.github.javaparser.ast.body.MethodDeclaration;
-import com.github.javaparser.ast.visitor.VoidVisitorAdapter;
 import jakarta.enterprise.context.ApplicationScoped;
+import org.eclipse.jdt.core.JavaCore;
+import org.eclipse.jdt.core.compiler.IProblem;
+import org.eclipse.jdt.core.dom.*;
 
 import java.io.File;
 import java.io.IOException;
@@ -19,31 +12,34 @@ import java.nio.file.Path;
 import java.nio.file.PathMatcher;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
 
 /**
- * In-process Java analysis service using JavaParser.
+ * In-process Java analysis service using Eclipse JDT Core APIs.
  * <p>
- * Runs inside the same JVM as the MCP server — no external JDTLS process is
- * needed.  Provides workspace management, syntax diagnostics and symbol
- * extraction for Java source files.  More features (type resolution, code
- * completion, …) can be added incrementally.
+ * Runs the Eclipse Java compiler and DOM AST parser inside the same JVM as the
+ * MCP server — no external JDTLS process is needed.  Uses the same JDT Core
+ * libraries that power Eclipse IDE and JDTLS but without the OSGi/LSP overhead.
+ * Provides workspace management, diagnostics and symbol extraction for Java
+ * source files.  More features (type resolution, code completion, …) can be
+ * added incrementally.
  */
 @ApplicationScoped
 public class JdtlsConnectionService {
 
     private static final Logger LOG = Logger.getLogger(JdtlsConnectionService.class.getName());
 
-    private final JavaParser javaParser;
+    /** Compiler options shared across all parse calls. */
+    private static final Map<String, String> COMPILER_OPTIONS = Map.of(
+            JavaCore.COMPILER_SOURCE, "17",
+            JavaCore.COMPILER_COMPLIANCE, "17",
+            JavaCore.COMPILER_CODEGEN_TARGET_PLATFORM, "17"
+    );
+
     private boolean initialized = false;
     private String currentWorkspaceRoot;
-
-    public JdtlsConnectionService() {
-        ParserConfiguration config = new ParserConfiguration();
-        config.setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17);
-        this.javaParser = new JavaParser(config);
-    }
 
     public boolean isInitialized() {
         return initialized;
@@ -96,16 +92,17 @@ public class JdtlsConnectionService {
             return "Java analysis service is ready. No workspace set — use initializeWorkspace(<path>).";
         }
         List<Path> javaFiles = listJavaFiles();
-        return "Java analysis service running (in-process). Workspace: " + currentWorkspaceRoot
+        return "Java analysis service running (in-process, JDT Core). Workspace: " + currentWorkspaceRoot
                 + ". Java files: " + javaFiles.size() + ".";
     }
 
     // -------------------------------------------------------------------------
-    // Diagnostics (syntax-level)
+    // Diagnostics (compiler-level)
     // -------------------------------------------------------------------------
 
     /**
-     * Parse a Java source file and return any syntax problems found.
+     * Parse a Java source file using the Eclipse compiler and return any
+     * problems found (syntax errors, type errors when bindings are available).
      *
      * @param filePath absolute path, or relative to the workspace root
      */
@@ -116,18 +113,22 @@ public class JdtlsConnectionService {
         }
 
         try {
-            String source = Files.readString(path);
-            ParseResult<CompilationUnit> result = javaParser.parse(source);
+            char[] source = Files.readString(path).toCharArray();
+            CompilationUnit cu = parseSource(source, path.getFileName().toString());
 
-            if (result.isSuccessful() && result.getProblems().isEmpty()) {
+            IProblem[] problems = cu.getProblems();
+            if (problems.length == 0) {
                 return "No issues found in: " + path.getFileName();
             }
 
             StringBuilder sb = new StringBuilder();
-            sb.append(result.getProblems().size())
+            sb.append(problems.length)
               .append(" issue(s) in ").append(path.getFileName()).append(":\n");
-            result.getProblems().forEach(p ->
-                    sb.append("  ").append(p.getVerboseMessage()).append("\n"));
+            for (IProblem p : problems) {
+                sb.append("  [").append(p.isError() ? "ERROR" : "WARNING")
+                  .append("] line ").append(p.getSourceLineNumber())
+                  .append(": ").append(p.getMessage()).append("\n");
+            }
             return sb.toString().stripTrailing();
         } catch (IOException e) {
             return "Error reading file: " + e.getMessage();
@@ -140,7 +141,7 @@ public class JdtlsConnectionService {
 
     /**
      * Parse a Java source file and return the declared symbols (packages,
-     * types, methods, fields, constructors).
+     * types, methods, fields, constructors) using the JDT Core DOM AST.
      *
      * @param filePath absolute path, or relative to the workspace root
      */
@@ -151,64 +152,111 @@ public class JdtlsConnectionService {
         }
 
         try {
-            String source = Files.readString(path);
-            ParseResult<CompilationUnit> result = javaParser.parse(source);
+            char[] source = Files.readString(path).toCharArray();
+            CompilationUnit cu = parseSource(source, path.getFileName().toString());
 
-            if (!result.isSuccessful() || result.getResult().isEmpty()) {
-                return "Cannot extract symbols — file has syntax errors. "
-                        + "Use getDiagnostics() to see details.";
+            // If there are hard errors, we can still try to extract symbols
+            // (JDT Core recovers partial ASTs) but warn the user.
+            IProblem[] errors = cu.getProblems();
+            boolean hasErrors = false;
+            for (IProblem p : errors) {
+                if (p.isError()) { hasErrors = true; break; }
             }
 
-            CompilationUnit cu = result.getResult().get();
             StringBuilder sb = new StringBuilder();
             sb.append("Symbols in ").append(path.getFileName()).append(":\n");
 
-            cu.getPackageDeclaration().ifPresent(p ->
-                    sb.append("  Package: ").append(p.getName()).append("\n"));
+            if (hasErrors) {
+                sb.append("  (file has errors — symbols may be incomplete)\n");
+            }
 
-            cu.getImports().forEach(i ->
-                    sb.append("  Import: ").append(i.getName())
-                      .append(i.isAsterisk() ? ".*" : "").append("\n"));
+            PackageDeclaration pkg = cu.getPackage();
+            if (pkg != null) {
+                sb.append("  Package: ").append(pkg.getName()).append("\n");
+            }
 
-            cu.accept(new VoidVisitorAdapter<Void>() {
+            for (Object imp : cu.imports()) {
+                ImportDeclaration id = (ImportDeclaration) imp;
+                sb.append("  Import: ").append(id.getName())
+                  .append(id.isOnDemand() ? ".*" : "").append("\n");
+            }
+
+            cu.accept(new ASTVisitor() {
                 @Override
-                public void visit(ClassOrInterfaceDeclaration n, Void arg) {
-                    sb.append("  ").append(n.isInterface() ? "Interface" : "Class")
-                      .append(": ").append(n.getNameAsString()).append("\n");
-                    super.visit(n, arg);
+                public boolean visit(TypeDeclaration node) {
+                    sb.append("  ").append(node.isInterface() ? "Interface" : "Class")
+                      .append(": ").append(node.getName()).append("\n");
+                    return true;
                 }
 
                 @Override
-                public void visit(EnumDeclaration n, Void arg) {
-                    sb.append("  Enum: ").append(n.getNameAsString()).append("\n");
-                    super.visit(n, arg);
+                public boolean visit(EnumDeclaration node) {
+                    sb.append("  Enum: ").append(node.getName()).append("\n");
+                    return true;
                 }
 
                 @Override
-                public void visit(FieldDeclaration n, Void arg) {
-                    n.getVariables().forEach(v ->
-                            sb.append("    Field: ").append(v.getNameAsString())
-                              .append(" : ").append(v.getType()).append("\n"));
+                public boolean visit(FieldDeclaration node) {
+                    for (Object frag : node.fragments()) {
+                        VariableDeclarationFragment v = (VariableDeclarationFragment) frag;
+                        sb.append("    Field: ").append(v.getName())
+                          .append(" : ").append(node.getType()).append("\n");
+                    }
+                    return false;
                 }
 
                 @Override
-                public void visit(ConstructorDeclaration n, Void arg) {
-                    sb.append("    Constructor: ").append(n.getNameAsString())
-                      .append("(").append(n.getParameters()).append(")\n");
+                public boolean visit(MethodDeclaration node) {
+                    if (node.isConstructor()) {
+                        sb.append("    Constructor: ").append(node.getName())
+                          .append("(").append(formatParams(node)).append(")\n");
+                    } else {
+                        sb.append("    Method: ").append(node.getName())
+                          .append("(").append(formatParams(node)).append(")")
+                          .append(" : ").append(node.getReturnType2()).append("\n");
+                    }
+                    return false;
                 }
-
-                @Override
-                public void visit(MethodDeclaration n, Void arg) {
-                    sb.append("    Method: ").append(n.getNameAsString())
-                      .append("(").append(n.getParameters()).append(")")
-                      .append(" : ").append(n.getType()).append("\n");
-                }
-            }, null);
+            });
 
             return sb.toString().stripTrailing();
         } catch (IOException e) {
             return "Error reading file: " + e.getMessage();
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // JDT Core helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Create a JDT Core {@link ASTParser}, parse the given source and return
+     * the resulting {@link CompilationUnit}.
+     */
+    CompilationUnit parseSource(char[] source, String unitName) {
+        ASTParser parser = ASTParser.newParser(AST.JLS17);
+        parser.setSource(source);
+        parser.setKind(ASTParser.K_COMPILATION_UNIT);
+        parser.setResolveBindings(false);
+        parser.setStatementsRecovery(true);
+        parser.setBindingsRecovery(true);
+        parser.setEnvironment(null, null, null, true);
+        parser.setUnitName(unitName);
+        parser.setCompilerOptions(COMPILER_OPTIONS);
+        return (CompilationUnit) parser.createAST(null);
+    }
+
+    /** Format method parameters as a comma-separated string. */
+    private static String formatParams(MethodDeclaration method) {
+        List<?> params = method.parameters();
+        if (params.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < params.size(); i++) {
+            SingleVariableDeclaration p = (SingleVariableDeclaration) params.get(i);
+            if (i > 0) sb.append(", ");
+            sb.append(p.getType()).append(" ").append(p.getName());
+        }
+        return sb.toString();
     }
 
     // -------------------------------------------------------------------------
