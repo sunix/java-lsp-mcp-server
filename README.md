@@ -1,104 +1,145 @@
 # Java LSP MCP Server
 
-A Model Context Protocol (MCP) server that exposes Java language analysis functionality to AI assistants like GitHub Copilot. This allows AI assistants to interact with Java codebases through features like diagnostics, symbol extraction, and more — all running in-process, no external JDTLS required.
+A Model Context Protocol (MCP) server that exposes Java Language Server Protocol (Eclipse JDT-LS) functionality to AI assistants like GitHub Copilot. This allows AI assistants to interact with Java codebases through standard LSP features like code completion, diagnostics, symbol definitions, and more.
 
 ## 🚧 Work in Progress
 
-This project is currently under active development. In-process Java analysis is implemented using Eclipse JDT Core APIs and ready for use.
+This project is currently under active development. JDTLS process management is now implemented and ready for end-to-end testing.
 
 ## ✅ What's Been Implemented
 
 ### Core Infrastructure
 - **Quarkus-based MCP Server** – HTTP transport for MCP protocol communication
-- **In-process Java Analysis** – Eclipse JDT Core-based parsing, diagnostics and symbol extraction running inside the same JVM (no external process needed)
+- **LSP4J Integration** – Library for communicating with Eclipse JDT Language Server
 - **Workspace Management** – Smart detection and initialization of Java projects (Maven/Gradle)
 - **Test Java Project** – Complete sample project in `test-workspace/` for testing
+- **JDTLS Process Management** – Start, connect to, and stop the Eclipse JDT Language Server process
 
 ### Available MCP Tools
 
 | Tool | Description | Status |
 |------|-------------|--------|
 | `helloworld()` | Basic greeting message | ✅ Working |
-| `checkJdtls()` | Check analysis service status and workspace info | ✅ Working |
-| `initializeWorkspace(path)` | Initialize Java workspace (use "default" for test project) | ✅ Working |
-| `getDiagnostics(file)` | Get syntax diagnostics (errors/warnings) for a Java file | ✅ Working |
-| `getSymbols(file)` | Extract symbols (classes, methods, fields) from a Java file | ✅ Working |
+| `startJdtls()` | Start the Eclipse JDT Language Server process | ✅ Working |
+| `stopJdtls()` | Stop the running JDTLS process (graceful + force) | ✅ Working |
+| `checkJdtls()` | Check JDTLS process status and PID | ✅ Working |
+| `initializeWorkspace(path)` | Initialize Java workspace; if JDTLS is running, performs the LSP handshake | ✅ Working |
 | `getTestWorkspacePath()` | Get path to the default test workspace | ✅ Working |
 
-### In-process Java Analysis (Hybrid Approach)
-Instead of spawning a separate JDTLS process, all Java analysis runs **in the same JVM** using [Eclipse JDT Core](https://www.eclipse.org/jdt/core/) — the same compiler and AST APIs that power Eclipse IDE and JDTLS:
-- **No external installation** – no JDTLS download or configuration needed
-- **Always available** – no start/stop lifecycle; the analysis service is ready immediately
-- **Compiler-level diagnostics** – the Eclipse Java compiler reports syntax errors, type errors, and warnings with line numbers
-- **Symbol extraction** – classes, interfaces, enums, methods, fields, constructors via the JDT DOM AST
-- **Incremental design** – more features (type resolution with classpath, code completion, refactoring) can be added over time using the same JDT Core APIs
+### JDTLS Process Integration
+- **Process Discovery** – Resolves JDTLS from the `jdtls.install.path` config property, the system `PATH`, or common paths (`~/.local/share/jdtls`, `/usr/local/jdtls`, `/opt/jdtls`)
+- **Process Lifecycle** – Starts JDTLS as a subprocess with the required JVM flags and OSGi arguments
+- **LSP4J Connection** – Connects to the process over its `stdin`/`stdout` streams using an LSP4J Launcher
+- **LSP Handshake** – Sends the `initialize` / `initialized` sequence when `initializeWorkspace()` is called with JDTLS running
+- **Clean Shutdown** – Sends the LSP `shutdown` + `exit` sequence before force-destroying the process
+- **Configurable** – JDTLS path is controlled by `jdtls.install.path` in `application.properties`
 
 ### Test Workspace
 - **Location**: `test-workspace/`
 - **Type**: Maven project with Java 17
 - **Content**: Calculator class with comprehensive tests
-- **Status**: ✅ Compiles and ready for analysis
+- **Status**: ✅ Compiles and ready for jdtls
 
-## 🧪 How to Test
+## 📋 Definition of Done – JDTLS Process Integration
+
+The following criteria define when the JDTLS Process Integration is complete and working:
+
+1. **`startJdtls()` works** – Calling the tool starts a JDTLS subprocess, connects via LSP4J, and reports the PID.
+2. **`checkJdtls()` reports running** – After `startJdtls()`, the tool reports the PID and current workspace.
+3. **`initializeWorkspace(path)` performs the LSP handshake** – When JDTLS is running, the tool sends `initialize`/`initialized` and reports server capabilities.
+4. **`stopJdtls()` works** – Calling the tool gracefully shuts down JDTLS and reports the former PID.
+5. **Error handling** – When JDTLS is not installed, `startJdtls()` returns a helpful message with installation instructions.
+
+## 🧪 How to Test JDTLS Integration
 
 ### Prerequisites
-- Java 17 or later
+- Java 25 (project requires Java 25)
 - Maven 3.9+
+- Eclipse JDT Language Server installed (see [Installation](#jdtls-installation))
 
-### Run Unit Tests
+### JDTLS Installation
+
+**Option A – via Python `jdtls` package** (recommended for quick setup):
 ```bash
-mvn test
+pip install jdtls
+# jdtls is now on your PATH and the home directory can be found with: dirname $(which jdtls)/../..
 ```
 
-The test suite (`JdtlsConnectionServiceTest`) covers:
-- Workspace validation (invalid path, non-Java project, Maven, Gradle)
-- Diagnostics for valid and broken Java files
-- Symbol extraction (classes, methods, fields, constructors)
-- File path resolution (absolute and workspace-relative)
-- Java file listing in workspace
+**Option B – manual download**:
+```bash
+mkdir -p ~/.local/share/jdtls
+curl -L "https://download.eclipse.org/jdtls/milestones/$(curl -s https://download.eclipse.org/jdtls/milestones/ | grep -oP '[\d.]+(?=/)' | sort -V | tail -1)/jdt-language-server-latest.tar.gz" \
+  | tar -xz -C ~/.local/share/jdtls
+```
+
+**Option C – configure the path explicitly** (if installed elsewhere):
+```properties
+# src/main/resources/application.properties
+jdtls.install.path=/path/to/your/jdtls
+```
 
 ### Run the MCP Server
 ```bash
+source "$HOME/.sdkman/bin/sdkman-init.sh"   # if using sdkman for Java 25
 mvn quarkus:dev
 ```
 
 ### Test via MCP Tools (step by step)
 ```
-1. initializeWorkspace("default")
-   → "Workspace initialized: /path/to/test-workspace (Maven project). Found 1 Java source file(s)."
+1. startJdtls()
+   → "JDTLS started successfully. PID: 12345. Use initializeWorkspace(<path>) to open a Java project."
 
 2. checkJdtls()
-   → "Java analysis service running (in-process, JDT Core). Workspace: /path/to/test-workspace. Java files: 1."
+   → "JDTLS running. PID: 12345. Workspace: not set"
 
-3. getDiagnostics("src/main/java/com/example/Calculator.java")
-   → "No issues found in: Calculator.java"
+3. initializeWorkspace("default")
+   → "Workspace initialized with JDTLS: /path/to/test-workspace (Maven project). LSP handshake complete."
 
-4. getSymbols("src/main/java/com/example/Calculator.java")
-   → "Symbols in Calculator.java:
-        Package: com.example
-        Class: Calculator
-          Field: history : List<Double>
-          Constructor: Calculator()
-          Method: add(double a, double b) : double
-          ..."
+4. checkJdtls()
+   → "JDTLS running. PID: 12345. Workspace: /path/to/test-workspace"
+
+5. stopJdtls()
+   → "JDTLS stopped. PID was: 12345"
 ```
+
+### Run Unit Tests
+```bash
+source "$HOME/.sdkman/bin/sdkman-init.sh"
+mvn test
+```
+
+The test suite (`JdtlsConnectionServiceTest`) covers:
+- Initial disconnected state
+- Workspace validation (invalid path, non-Java project, Maven, Gradle)
+- Server info messages when JDTLS is not running
+- Graceful `stopJdtls()` when not running
+- Graceful `startJdtls()` failure when JDTLS is not installed
+- JDTLS command-builder and launcher JAR discovery helpers
 
 ## 🎯 Next Steps
 
-1. **Type Resolution** – Add classpath-aware analysis for richer diagnostics
-2. **Code Completion** – Suggest completions at a given cursor position
-3. **Go to Definition** – Resolve symbol locations across files
-4. **Code Formatting** – Format Java source files
-5. **Refactoring** – Rename, extract method, etc.
+1. **Core LSP Tools** – Expose key language features:
+   - `getSymbols(file)` – Extract symbols from Java files
+   - `getCompletions(file, line, column)` – Code completion
+   - `getDiagnostics(file)` – Compilation errors and warnings
+   - `formatCode(file)` – Code formatting
+   - `getDefinition(file, line, column)` – Go to definition
+2. **Error Handling** – Robust error handling for LSP communication
+3. **Performance Optimization** – Efficient caching and connection management
 
 ## 🚀 Running the application in dev mode
 
 ### Prerequisites
-- Java 17 or later
+- Java 25
 - Maven 3.9+
 
 ### Start the MCP Server
 ```bash
+# Install Java 25 via sdkman (if needed)
+curl -s "https://get.sdkman.io" | bash
+source "$HOME/.sdkman/bin/sdkman-init.sh"
+sdk install java 25.0.2-tem
+
 # Navigate to project directory
 cd java-lsp-mcp-server
 
@@ -134,14 +175,14 @@ The server will start on `http://localhost:8080` with MCP endpoints available.
 
 ```
 java-lsp-mcp-server/
-├── pom.xml                           # Main project configuration (Java 17)
+├── pom.xml                           # Main project configuration (Java 25)
 ├── src/main/java/org/sunix/
 │   ├── MyTool.java                   # MCP tool implementations
-│   └── JdtlsConnectionService.java   # In-process Java analysis (JDT Core APIs)
+│   └── JdtlsConnectionService.java   # JDTLS process management & LSP connection
 ├── src/main/resources/
-│   └── application.properties        # Configuration
+│   └── application.properties        # Configuration (jdtls.install.path, etc.)
 ├── src/test/java/org/sunix/
-│   └── JdtlsConnectionServiceTest.java  # Unit tests
+│   └── JdtlsConnectionServiceTest.java  # Unit tests for the connection service
 ├── test-workspace/                   # Test Java project
 │   ├── pom.xml                       # Maven configuration
 │   └── src/main/java/com/example/
@@ -169,14 +210,15 @@ With the server running, you can test the available MCP tools through any connec
 ## 🤝 Contributing
 
 This is an active WIP project. Current focus areas:
-- Richer Java analysis features (type resolution, completions)
+- LSP feature exposure through MCP tools (diagnostics, completions, symbols…)
 - Error handling and robustness
 - Performance optimization
 
 ## 📚 References
 
 - [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) – Protocol for AI-tool communication
-- [Eclipse JDT Core](https://www.eclipse.org/jdt/core/) – Java compiler and AST APIs (same as Eclipse IDE)
+- [Eclipse JDT Language Server](https://github.com/eclipse/eclipse.jdt.ls) – Java language server implementation
+- [LSP4J](https://github.com/eclipse/lsp4j) – Language Server Protocol implementation for Java
 - [Quarkus MCP Server](https://docs.quarkiverse.io/quarkus-mcp-server/dev/) – Quarkus extension for MCP servers
 
 ---
