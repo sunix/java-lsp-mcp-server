@@ -31,6 +31,9 @@ public class JdtlsConnectionService {
 
     private static final Logger LOG = Logger.getLogger(JdtlsConnectionService.class.getName());
 
+    /** JDT AST language level matching the compiler options. */
+    private static final int JLS_LEVEL = AST.JLS17;
+
     /** Compiler options shared across all parse calls. */
     private static final Map<String, String> COMPILER_OPTIONS = Map.of(
             JavaCore.COMPILER_SOURCE, "17",
@@ -232,9 +235,11 @@ public class JdtlsConnectionService {
     /**
      * Create a JDT Core {@link ASTParser}, parse the given source and return
      * the resulting {@link CompilationUnit}.
+     * <p>
+     * Package-private so tests in the same package can verify parsing directly.
      */
     CompilationUnit parseSource(char[] source, String unitName) {
-        ASTParser parser = ASTParser.newParser(AST.JLS17);
+        ASTParser parser = ASTParser.newParser(JLS_LEVEL);
         parser.setSource(source);
         parser.setKind(ASTParser.K_COMPILATION_UNIT);
         parser.setResolveBindings(false);
