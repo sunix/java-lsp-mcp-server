@@ -214,4 +214,78 @@ class JdtlsConnectionServiceTest {
             Files.delete(fakeData);
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Core LSP tools – not-connected / file-not-found guards
+    // -------------------------------------------------------------------------
+
+    @Test
+    void getSymbolsWhenNotConnected() throws Exception {
+        String result = service.getSymbols("/any/file.java").get(5, TimeUnit.SECONDS);
+        assertTrue(result.contains("not running"),
+                "Should indicate JDTLS is not running, got: " + result);
+    }
+
+    @Test
+    void getCompletionsWhenNotConnected() throws Exception {
+        String result = service.getCompletions("/any/file.java", 0, 0).get(5, TimeUnit.SECONDS);
+        assertTrue(result.contains("not running"),
+                "Should indicate JDTLS is not running, got: " + result);
+    }
+
+    @Test
+    void getDiagnosticsWhenNotConnected() throws Exception {
+        String result = service.getDiagnostics("/any/file.java").get(5, TimeUnit.SECONDS);
+        assertTrue(result.contains("not running"),
+                "Should indicate JDTLS is not running, got: " + result);
+    }
+
+    @Test
+    void formatCodeWhenNotConnected() throws Exception {
+        String result = service.formatCode("/any/file.java").get(5, TimeUnit.SECONDS);
+        assertTrue(result.contains("not running"),
+                "Should indicate JDTLS is not running, got: " + result);
+    }
+
+    @Test
+    void getDefinitionWhenNotConnected() throws Exception {
+        String result = service.getDefinition("/any/file.java", 0, 0).get(5, TimeUnit.SECONDS);
+        assertTrue(result.contains("not running"),
+                "Should indicate JDTLS is not running, got: " + result);
+    }
+
+    // -------------------------------------------------------------------------
+    // applyTextEdits helper
+    // -------------------------------------------------------------------------
+
+    @Test
+    void applyTextEditsReplacesRange() {
+        String content = "hello world\n";
+        // Replace "world" (chars 6-11 on line 0) with "Java"
+        org.eclipse.lsp4j.TextEdit edit = new org.eclipse.lsp4j.TextEdit(
+                new org.eclipse.lsp4j.Range(
+                        new org.eclipse.lsp4j.Position(0, 6),
+                        new org.eclipse.lsp4j.Position(0, 11)),
+                "Java");
+        String result = service.applyTextEdits(content, List.of(edit));
+        assertEquals("hello Java\n", result);
+    }
+
+    @Test
+    void applyTextEditsMultipleEditsAppliedCorrectly() {
+        String content = "aaa\nbbb\nccc\n";
+        // Replace "bbb" on line 1, then replace "aaa" on line 0 (reverse order expected)
+        org.eclipse.lsp4j.TextEdit edit1 = new org.eclipse.lsp4j.TextEdit(
+                new org.eclipse.lsp4j.Range(
+                        new org.eclipse.lsp4j.Position(1, 0),
+                        new org.eclipse.lsp4j.Position(1, 3)),
+                "BBB");
+        org.eclipse.lsp4j.TextEdit edit2 = new org.eclipse.lsp4j.TextEdit(
+                new org.eclipse.lsp4j.Range(
+                        new org.eclipse.lsp4j.Position(0, 0),
+                        new org.eclipse.lsp4j.Position(0, 3)),
+                "AAA");
+        String result = service.applyTextEdits(content, List.of(edit1, edit2));
+        assertEquals("AAA\nBBB\nccc\n", result);
+    }
 }

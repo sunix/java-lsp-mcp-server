@@ -6,6 +6,12 @@ import java.util.concurrent.TimeUnit;
 
 public class MyTool {
 
+    /** Timeout (in seconds) for standard LSP tool requests. */
+    private static final int LSP_TOOL_TIMEOUT_SECONDS = 15;
+
+    /** Extended timeout (in seconds) for getDiagnostics, which waits for push notifications. */
+    private static final int DIAGNOSTICS_TIMEOUT_SECONDS = 20;
+
     @Inject
     JdtlsConnectionService jdtlsService;
 
@@ -62,5 +68,60 @@ public class MyTool {
     @Tool(description = "Get the default test workspace path")
     public String getTestWorkspacePath() {
         return jdtlsService.getDefaultTestWorkspace();
+    }
+
+    @Tool(description = "Extract document symbols (classes, methods, fields) from a Java source file. "
+            + "Requires JDTLS running and workspace initialized. "
+            + "Provide the absolute path to the .java file.")
+    public String getSymbols(String filePath) {
+        try {
+            return jdtlsService.getSymbols(filePath).get(LSP_TOOL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return "Error getting symbols: " + e.getMessage();
+        }
+    }
+
+    @Tool(description = "Get code completion suggestions at a position in a Java file. "
+            + "Line and column are 0-based. "
+            + "Requires JDTLS running and workspace initialized.")
+    public String getCompletions(String filePath, int line, int column) {
+        try {
+            return jdtlsService.getCompletions(filePath, line, column).get(LSP_TOOL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return "Error getting completions: " + e.getMessage();
+        }
+    }
+
+    @Tool(description = "Get compilation errors and warnings (diagnostics) for a Java file. "
+            + "Requires JDTLS running and workspace initialized. "
+            + "Provide the absolute path to the .java file.")
+    public String getDiagnostics(String filePath) {
+        try {
+            return jdtlsService.getDiagnostics(filePath).get(DIAGNOSTICS_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return "Error getting diagnostics: " + e.getMessage();
+        }
+    }
+
+    @Tool(description = "Format a Java source file using the JDTLS formatter and write the result back to disk. "
+            + "Requires JDTLS running and workspace initialized. "
+            + "Provide the absolute path to the .java file.")
+    public String formatCode(String filePath) {
+        try {
+            return jdtlsService.formatCode(filePath).get(LSP_TOOL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return "Error formatting code: " + e.getMessage();
+        }
+    }
+
+    @Tool(description = "Go to definition for a symbol at a given position in a Java file. "
+            + "Line and column are 0-based. "
+            + "Requires JDTLS running and workspace initialized.")
+    public String getDefinition(String filePath, int line, int column) {
+        try {
+            return jdtlsService.getDefinition(filePath, line, column).get(LSP_TOOL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return "Error getting definition: " + e.getMessage();
+        }
     }
 }

@@ -4,7 +4,7 @@ A Model Context Protocol (MCP) server that exposes Java Language Server Protocol
 
 ## 🚧 Work in Progress
 
-This project is currently under active development. JDTLS process management is now implemented and ready for end-to-end testing.
+This project is currently under active development. Core LSP tools are now implemented on top of the JDTLS process management layer.
 
 ## ✅ What's Been Implemented
 
@@ -25,6 +25,11 @@ This project is currently under active development. JDTLS process management is 
 | `checkJdtls()` | Check JDTLS process status and PID | ✅ Working |
 | `initializeWorkspace(path)` | Initialize Java workspace; if JDTLS is running, performs the LSP handshake | ✅ Working |
 | `getTestWorkspacePath()` | Get path to the default test workspace | ✅ Working |
+| `getSymbols(filePath)` | Extract symbols (classes, methods, fields) from a Java file | ✅ Working |
+| `getCompletions(filePath, line, column)` | Code completion at a 0-based position | ✅ Working |
+| `getDiagnostics(filePath)` | Compilation errors and warnings | ✅ Working |
+| `formatCode(filePath)` | Format a Java file and write result to disk | ✅ Working |
+| `getDefinition(filePath, line, column)` | Go to definition at a 0-based position | ✅ Working |
 
 ### JDTLS Process Integration
 - **Process Discovery** – Resolves JDTLS from the `jdtls.install.path` config property, the system `PATH`, or common paths (`~/.local/share/jdtls`, `/usr/local/jdtls`, `/opt/jdtls`)
@@ -33,6 +38,13 @@ This project is currently under active development. JDTLS process management is 
 - **LSP Handshake** – Sends the `initialize` / `initialized` sequence when `initializeWorkspace()` is called with JDTLS running
 - **Clean Shutdown** – Sends the LSP `shutdown` + `exit` sequence before force-destroying the process
 - **Configurable** – JDTLS path is controlled by `jdtls.install.path` in `application.properties`
+
+### Core LSP Features
+- **`getSymbols`** – Opens the file in JDTLS via `textDocument/didOpen` and calls `textDocument/documentSymbol` to return all top-level and nested symbols with their kind and line number.
+- **`getCompletions`** – Opens the file, calls `textDocument/completion` at the given 0-based `(line, column)` position, and returns up to 20 completion items with labels and details.
+- **`getDiagnostics`** – Opens the file, then waits up to 10 s for JDTLS to push `publishDiagnostics` notifications, and returns all errors/warnings with severity and line number.
+- **`formatCode`** – Opens the file, calls `textDocument/formatting` with 4-space indentation, applies the returned `TextEdit`s to the file on disk, and notifies JDTLS of the change via `textDocument/didChange`.
+- **`getDefinition`** – Opens the file, calls `textDocument/definition` at the given position, and returns the target URI and line number.
 
 ### Test Workspace
 - **Location**: `test-workspace/`
@@ -115,17 +127,78 @@ The test suite (`JdtlsConnectionServiceTest`) covers:
 - Graceful `stopJdtls()` when not running
 - Graceful `startJdtls()` failure when JDTLS is not installed
 - JDTLS command-builder and launcher JAR discovery helpers
+- Each new LSP tool (`getSymbols`, `getCompletions`, `getDiagnostics`, `formatCode`, `getDefinition`) returns the correct "not running" message when JDTLS is not started
+- `applyTextEdits` helper correctly applies single and multiple LSP text edits
+
+## 🧪 End-to-End Test Walkthrough – Core LSP Tools
+
+> **Prerequisites**: JDTLS installed (see above), MCP server running (`mvn quarkus:dev`).
+
+The test workspace contains a `Calculator.java` class. The file paths below use the project root as `$PROJECT`.
+
+### 1. Start JDTLS and open the workspace
+```
+startJdtls()
+→ "JDTLS started successfully. PID: 12345. ..."
+
+initializeWorkspace("default")
+→ "Workspace initialized with JDTLS: $PROJECT/test-workspace (Maven project). LSP handshake complete. ..."
+```
+
+### 2. getSymbols – extract document symbols
+```
+getSymbols("$PROJECT/test-workspace/src/main/java/com/example/Calculator.java")
+→ Symbols in .../Calculator.java:
+    Class Calculator [line 3]
+    Method add [line 5]
+    Method subtract [line 9]
+    Method multiply [line 13]
+    Method divide [line 17]
+```
+
+### 3. getDiagnostics – compilation errors and warnings
+```
+getDiagnostics("$PROJECT/test-workspace/src/main/java/com/example/Calculator.java")
+→ No diagnostics for: .../Calculator.java
+```
+*(A file with a deliberate syntax error would report `[Error] line N: <message>`.)*
+
+### 4. getCompletions – code completion
+```
+getCompletions("$PROJECT/test-workspace/src/main/java/com/example/Calculator.java", 4, 15)
+→ Completions at line 5, col 16 in .../Calculator.java:
+    add(int a, int b) – int
+    ... (other suggestions)
+```
+*(Line/column are 0-based; adjust to match the position of interest in the file.)*
+
+### 5. formatCode – format the file
+```
+formatCode("$PROJECT/test-workspace/src/main/java/com/example/Calculator.java")
+→ File formatted: .../Calculator.java (N edit(s) applied)
+  -- or --
+→ No formatting changes needed for: .../Calculator.java
+```
+
+### 6. getDefinition – go to definition
+```
+getDefinition("$PROJECT/test-workspace/src/main/java/com/example/Calculator.java", 8, 10)
+→ Definition at line 9, col 11 in .../Calculator.java:
+    file:///...Calculator.java line 9
+```
+
+### 7. Stop JDTLS
+```
+stopJdtls()
+→ "JDTLS stopped. PID was: 12345"
+```
 
 ## 🎯 Next Steps
 
-1. **Core LSP Tools** – Expose key language features:
-   - `getSymbols(file)` – Extract symbols from Java files
-   - `getCompletions(file, line, column)` – Code completion
-   - `getDiagnostics(file)` – Compilation errors and warnings
-   - `formatCode(file)` – Code formatting
-   - `getDefinition(file, line, column)` – Go to definition
-2. **Error Handling** – Robust error handling for LSP communication
-3. **Performance Optimization** – Efficient caching and connection management
+1. **Error Handling** – Robust error handling for LSP communication (timeouts, reconnection)
+2. **Performance Optimization** – Efficient caching and connection management; avoid redundant `didOpen` calls across tool invocations
+3. **Extended LSP Features** – Hover (`textDocument/hover`), find references (`textDocument/references`), rename (`textDocument/rename`)
+4. **Multi-file Workspace** – Support multiple open files and cross-file navigation
 
 ## 🚀 Running the application in dev mode
 
@@ -175,10 +248,10 @@ The server will start on `http://localhost:8080` with MCP endpoints available.
 
 ```
 java-lsp-mcp-server/
-├── pom.xml                           # Main project configuration (Java 25)
+├── pom.xml                           # Main project configuration (Java 17)
 ├── src/main/java/org/sunix/
-│   ├── MyTool.java                   # MCP tool implementations
-│   └── JdtlsConnectionService.java   # JDTLS process management & LSP connection
+│   ├── MyTool.java                   # MCP tool implementations (all @Tool-annotated methods)
+│   └── JdtlsConnectionService.java   # JDTLS process management, LSP connection & core LSP tools
 ├── src/main/resources/
 │   └── application.properties        # Configuration (jdtls.install.path, etc.)
 ├── src/test/java/org/sunix/
