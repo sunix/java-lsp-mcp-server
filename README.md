@@ -4,24 +4,35 @@ A Model Context Protocol (MCP) server that exposes Java Language Server Protocol
 
 ## 🚧 Work in Progress
 
-This project is currently under active development. Basic infrastructure is complete, with workspace initialization working and ready for full jdtls integration.
+This project is currently under active development. JDTLS process management is now implemented and ready for end-to-end testing.
 
 ## ✅ What's Been Implemented
 
 ### Core Infrastructure
-- **Quarkus-based MCP Server** - HTTP transport for MCP protocol communication
-- **LSP4J Integration** - Library for communicating with Eclipse JDT Language Server
-- **Workspace Management** - Smart detection and initialization of Java projects (Maven/Gradle)
-- **Test Java Project** - Complete sample project in `test-workspace/` for testing
+- **Quarkus-based MCP Server** – HTTP transport for MCP protocol communication
+- **LSP4J Integration** – Library for communicating with Eclipse JDT Language Server
+- **Workspace Management** – Smart detection and initialization of Java projects (Maven/Gradle)
+- **Test Java Project** – Complete sample project in `test-workspace/` for testing
+- **JDTLS Process Management** – Start, connect to, and stop the Eclipse JDT Language Server process
 
 ### Available MCP Tools
 
 | Tool | Description | Status |
 |------|-------------|--------|
 | `helloworld()` | Basic greeting message | ✅ Working |
-| `checkJdtls()` | Check jdtls connection status and workspace info | ✅ Working |
-| `initializeWorkspace(path)` | Initialize Java workspace (use "default" for test project) | ✅ Working |
+| `startJdtls()` | Start the Eclipse JDT Language Server process | ✅ Working |
+| `stopJdtls()` | Stop the running JDTLS process (graceful + force) | ✅ Working |
+| `checkJdtls()` | Check JDTLS process status and PID | ✅ Working |
+| `initializeWorkspace(path)` | Initialize Java workspace; if JDTLS is running, performs the LSP handshake | ✅ Working |
 | `getTestWorkspacePath()` | Get path to the default test workspace | ✅ Working |
+
+### JDTLS Process Integration
+- **Process Discovery** – Resolves JDTLS from the `jdtls.install.path` config property, the system `PATH`, or common paths (`~/.local/share/jdtls`, `/usr/local/jdtls`, `/opt/jdtls`)
+- **Process Lifecycle** – Starts JDTLS as a subprocess with the required JVM flags and OSGi arguments
+- **LSP4J Connection** – Connects to the process over its `stdin`/`stdout` streams using an LSP4J Launcher
+- **LSP Handshake** – Sends the `initialize` / `initialized` sequence when `initializeWorkspace()` is called with JDTLS running
+- **Clean Shutdown** – Sends the LSP `shutdown` + `exit` sequence before force-destroying the process
+- **Configurable** – JDTLS path is controlled by `jdtls.install.path` in `application.properties`
 
 ### Test Workspace
 - **Location**: `test-workspace/`
@@ -29,27 +40,106 @@ This project is currently under active development. Basic infrastructure is comp
 - **Content**: Calculator class with comprehensive tests
 - **Status**: ✅ Compiles and ready for jdtls
 
+## 📋 Definition of Done – JDTLS Process Integration
+
+The following criteria define when the JDTLS Process Integration is complete and working:
+
+1. **`startJdtls()` works** – Calling the tool starts a JDTLS subprocess, connects via LSP4J, and reports the PID.
+2. **`checkJdtls()` reports running** – After `startJdtls()`, the tool reports the PID and current workspace.
+3. **`initializeWorkspace(path)` performs the LSP handshake** – When JDTLS is running, the tool sends `initialize`/`initialized` and reports server capabilities.
+4. **`stopJdtls()` works** – Calling the tool gracefully shuts down JDTLS and reports the former PID.
+5. **Error handling** – When JDTLS is not installed, `startJdtls()` returns a helpful message with installation instructions.
+
+## 🧪 How to Test JDTLS Integration
+
+### Prerequisites
+- Java 25 (project requires Java 25)
+- Maven 3.9+
+- Eclipse JDT Language Server installed (see [Installation](#jdtls-installation))
+
+### JDTLS Installation
+
+**Option A – via Python `jdtls` package** (recommended for quick setup):
+```bash
+pip install jdtls
+# jdtls is now on your PATH and the home directory can be found with: dirname $(which jdtls)/../..
+```
+
+**Option B – manual download**:
+```bash
+mkdir -p ~/.local/share/jdtls
+curl -L "https://download.eclipse.org/jdtls/milestones/$(curl -s https://download.eclipse.org/jdtls/milestones/ | grep -oP '[\d.]+(?=/)' | sort -V | tail -1)/jdt-language-server-latest.tar.gz" \
+  | tar -xz -C ~/.local/share/jdtls
+```
+
+**Option C – configure the path explicitly** (if installed elsewhere):
+```properties
+# src/main/resources/application.properties
+jdtls.install.path=/path/to/your/jdtls
+```
+
+### Run the MCP Server
+```bash
+source "$HOME/.sdkman/bin/sdkman-init.sh"   # if using sdkman for Java 25
+mvn quarkus:dev
+```
+
+### Test via MCP Tools (step by step)
+```
+1. startJdtls()
+   → "JDTLS started successfully. PID: 12345. Use initializeWorkspace(<path>) to open a Java project."
+
+2. checkJdtls()
+   → "JDTLS running. PID: 12345. Workspace: not set"
+
+3. initializeWorkspace("default")
+   → "Workspace initialized with JDTLS: /path/to/test-workspace (Maven project). LSP handshake complete."
+
+4. checkJdtls()
+   → "JDTLS running. PID: 12345. Workspace: /path/to/test-workspace"
+
+5. stopJdtls()
+   → "JDTLS stopped. PID was: 12345"
+```
+
+### Run Unit Tests
+```bash
+source "$HOME/.sdkman/bin/sdkman-init.sh"
+mvn test
+```
+
+The test suite (`JdtlsConnectionServiceTest`) covers:
+- Initial disconnected state
+- Workspace validation (invalid path, non-Java project, Maven, Gradle)
+- Server info messages when JDTLS is not running
+- Graceful `stopJdtls()` when not running
+- Graceful `startJdtls()` failure when JDTLS is not installed
+- JDTLS command-builder and launcher JAR discovery helpers
+
 ## 🎯 Next Steps
 
-1. **JDTLS Process Integration** - Start and manage Eclipse JDT Language Server process
-2. **LSP Communication** - Establish two-way communication with jdtls
-3. **Core LSP Tools** - Expose key language features:
-   - `getSymbols(file)` - Extract symbols from Java files
-   - `getCompletions(file, line, column)` - Code completion
-   - `getDiagnostics(file)` - Compilation errors and warnings
-   - `formatCode(file)` - Code formatting
-   - `getDefinition(file, line, column)` - Go to definition
-4. **Error Handling** - Robust error handling for LSP communication
-5. **Performance Optimization** - Efficient caching and connection management
+1. **Core LSP Tools** – Expose key language features:
+   - `getSymbols(file)` – Extract symbols from Java files
+   - `getCompletions(file, line, column)` – Code completion
+   - `getDiagnostics(file)` – Compilation errors and warnings
+   - `formatCode(file)` – Code formatting
+   - `getDefinition(file, line, column)` – Go to definition
+2. **Error Handling** – Robust error handling for LSP communication
+3. **Performance Optimization** – Efficient caching and connection management
 
 ## 🚀 Running the application in dev mode
 
 ### Prerequisites
-- Java 17 or later
+- Java 25
 - Maven 3.9+
 
 ### Start the MCP Server
 ```bash
+# Install Java 25 via sdkman (if needed)
+curl -s "https://get.sdkman.io" | bash
+source "$HOME/.sdkman/bin/sdkman-init.sh"
+sdk install java 25.0.2-tem
+
 # Navigate to project directory
 cd java-lsp-mcp-server
 
@@ -59,29 +149,11 @@ mvn quarkus:dev
 
 The server will start on `http://localhost:8080` with MCP endpoints available.
 
-### Test the Available Tools
-You can test the MCP tools directly through the connected client or using the dev UI at `http://localhost:8080/q/dev/`.
-
-**Example Tool Usage:**
-```bash
-# Initialize the default test workspace
-initializeWorkspace("default")
-# → "Workspace initialized: /path/to/test-workspace (Maven project)"
-
-# Check jdtls status
-checkJdtls()
-# → "Workspace initialized: /path/to/test-workspace, but JDTLS not connected yet."
-
-# Get test workspace path
-getTestWorkspacePath()
-# → "/path/to/test-workspace"
-```
-
 ## 🔗 Connecting with GitHub Copilot in VS Code
 
 ### Option 1: Direct HTTP Connection
 1. **Start the MCP Server** (see above)
-2. **Configure VS Code Settings** - Add to your VS Code `settings.json`:
+2. **Configure VS Code Settings** – Add to your VS Code `settings.json`:
    ```json
    {
      "github.copilot.chat.mcp.servers": {
@@ -99,21 +171,18 @@ getTestWorkspacePath()
 2. **Configure Connection** to `http://localhost:8080/mcp`
 3. **Connect from GitHub Copilot Chat** using the configured MCP client
 
-### Verification
-Once connected, you should be able to use the Java LSP tools in GitHub Copilot chat:
-```
-@workspace /initializeWorkspace default
-@workspace /checkJdtls
-```
-
 ## 🏗️ Project Structure
 
 ```
 java-lsp-mcp-server/
-├── pom.xml                           # Main project configuration
+├── pom.xml                           # Main project configuration (Java 25)
 ├── src/main/java/org/sunix/
 │   ├── MyTool.java                   # MCP tool implementations
-│   └── JdtlsConnectionService.java   # JDTLS connection management
+│   └── JdtlsConnectionService.java   # JDTLS process management & LSP connection
+├── src/main/resources/
+│   └── application.properties        # Configuration (jdtls.install.path, etc.)
+├── src/test/java/org/sunix/
+│   └── JdtlsConnectionServiceTest.java  # Unit tests for the connection service
 ├── test-workspace/                   # Test Java project
 │   ├── pom.xml                       # Maven configuration
 │   └── src/main/java/com/example/
@@ -141,17 +210,16 @@ With the server running, you can test the available MCP tools through any connec
 ## 🤝 Contributing
 
 This is an active WIP project. Current focus areas:
-- JDTLS process management and communication
-- LSP feature exposure through MCP tools
+- LSP feature exposure through MCP tools (diagnostics, completions, symbols…)
 - Error handling and robustness
 - Performance optimization
 
 ## 📚 References
 
-- [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) - Protocol for AI-tool communication
-- [Eclipse JDT Language Server](https://github.com/eclipse/eclipse.jdt.ls) - Java language server implementation
-- [LSP4J](https://github.com/eclipse/lsp4j) - Language Server Protocol implementation for Java
-- [Quarkus MCP Server](https://docs.quarkiverse.io/quarkus-mcp-server/dev/) - Quarkus extension for MCP servers
+- [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) – Protocol for AI-tool communication
+- [Eclipse JDT Language Server](https://github.com/eclipse/eclipse.jdt.ls) – Java language server implementation
+- [LSP4J](https://github.com/eclipse/lsp4j) – Language Server Protocol implementation for Java
+- [Quarkus MCP Server](https://docs.quarkiverse.io/quarkus-mcp-server/dev/) – Quarkus extension for MCP servers
 
 ---
 
@@ -178,7 +246,7 @@ The application can be packaged using:
 ```
 
 It produces the `quarkus-run.jar` file in the `target/quarkus-app/` directory.
-Be aware that it’s not an _über-jar_ as the dependencies are copied into the `target/quarkus-app/lib/` directory.
+Be aware that it's not an _über-jar_ as the dependencies are copied into the `target/quarkus-app/lib/` directory.
 
 The application is now runnable using `java -jar target/quarkus-app/quarkus-run.jar`.
 
