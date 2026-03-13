@@ -20,7 +20,8 @@ This project is currently under active development. Core LSP tools are now imple
 | Tool | Description | Status |
 |------|-------------|--------|
 | `helloworld()` | Basic greeting message | ✅ Working |
-| `startJdtls()` | Start the Eclipse JDT Language Server process | ✅ Working |
+| `installJdtls()` | Download and install JDTLS automatically to the managed directory | ✅ Working |
+| `startJdtls()` | Start the Eclipse JDT Language Server process (auto-downloads if needed) | ✅ Working |
 | `stopJdtls()` | Stop the running JDTLS process (graceful + force) | ✅ Working |
 | `checkJdtls()` | Check JDTLS process status and PID | ✅ Working |
 | `initializeWorkspace(path)` | Initialize Java workspace; if JDTLS is running, performs the LSP handshake | ✅ Working |
@@ -32,7 +33,8 @@ This project is currently under active development. Core LSP tools are now imple
 | `getDefinition(filePath, line, column)` | Go to definition at a 0-based position | ✅ Working |
 
 ### JDTLS Process Integration
-- **Process Discovery** – Resolves JDTLS from the `jdtls.install.path` config property, the system `PATH`, or common paths (`~/.local/share/jdtls`, `/usr/local/jdtls`, `/opt/jdtls`)
+- **Automatic Download** – When JDTLS is not found, it is downloaded automatically from Eclipse's download server and installed to `~/.local/share/java-lsp-mcp-server/jdtls`. Controlled by `jdtls.auto.download` (default: `true`).
+- **Process Discovery** – Resolves JDTLS from the managed install directory, the `jdtls.install.path` config property, the system `PATH`, or common paths (`~/.local/share/jdtls`, `/usr/local/jdtls`, `/opt/jdtls`)
 - **Process Lifecycle** – Starts JDTLS as a subprocess with the required JVM flags and OSGi arguments
 - **LSP4J Connection** – Connects to the process over its `stdin`/`stdout` streams using an LSP4J Launcher
 - **LSP Handshake** – Sends the `initialize` / `initialized` sequence when `initializeWorkspace()` is called with JDTLS running
@@ -67,24 +69,46 @@ The following criteria define when the JDTLS Process Integration is complete and
 ### Prerequisites
 - Java 25 (project requires Java 25)
 - Maven 3.9+
-- Eclipse JDT Language Server installed (see [Installation](#jdtls-installation))
+- Eclipse JDT Language Server – downloaded automatically on first `startJdtls()` call (requires `tar` on your PATH and internet access), or install manually (see [Installation](#jdtls-installation))
 
 ### JDTLS Installation
 
-**Option A – via Python `jdtls` package** (recommended for quick setup):
+**Option A – automatic download (recommended)**
+
+JDTLS is downloaded automatically the first time you call `startJdtls()` (or the explicit `installJdtls()` tool). No manual steps are needed. The server is installed to `~/.local/share/java-lsp-mcp-server/jdtls`.
+
+> **Requirements**: internet access and the `tar` command on your PATH (standard on Linux and macOS).
+
+You can also trigger the download explicitly:
+```
+installJdtls()
+→ "JDTLS downloaded and installed to: /home/<user>/.local/share/java-lsp-mcp-server/jdtls"
+```
+
+To pin a specific version, set `jdtls.download.url` in `application.properties`:
+```properties
+jdtls.download.url=https://download.eclipse.org/jdtls/milestones/1.40.0/jdt-language-server-1.40.0-202503201301.tar.gz
+```
+
+To disable automatic download entirely:
+```properties
+jdtls.auto.download=false
+```
+
+**Option B – via Python `jdtls` package**:
 ```bash
 pip install jdtls
 # jdtls is now on your PATH and the home directory can be found with: dirname $(which jdtls)/../..
 ```
 
-**Option B – manual download**:
+**Option C – manual download**:
 ```bash
 mkdir -p ~/.local/share/jdtls
 curl -L "https://download.eclipse.org/jdtls/milestones/$(curl -s https://download.eclipse.org/jdtls/milestones/ | grep -oP '[\d.]+(?=/)' | sort -V | tail -1)/jdt-language-server-latest.tar.gz" \
   | tar -xz -C ~/.local/share/jdtls
 ```
 
-**Option C – configure the path explicitly** (if installed elsewhere):
+**Option D – configure the path explicitly** (if installed elsewhere):
 ```properties
 # src/main/resources/application.properties
 jdtls.install.path=/path/to/your/jdtls
@@ -125,10 +149,11 @@ The test suite (`JdtlsConnectionServiceTest`) covers:
 - Workspace validation (invalid path, non-Java project, Maven, Gradle)
 - Server info messages when JDTLS is not running
 - Graceful `stopJdtls()` when not running
-- Graceful `startJdtls()` failure when JDTLS is not installed
+- Graceful `startJdtls()` failure when JDTLS is not installed and auto-download is disabled
 - JDTLS command-builder and launcher JAR discovery helpers
 - Each new LSP tool (`getSymbols`, `getCompletions`, `getDiagnostics`, `formatCode`, `getDefinition`) returns the correct "not running" message when JDTLS is not started
 - `applyTextEdits` helper correctly applies single and multiple LSP text edits
+- Auto-download helpers: `getManagedJdtlsDir()`, `parseLatestVersion()`, `parseDownloadUrl()`, `compareVersions()`, `downloadAndInstallJdtls()` (already-installed branch)
 
 ## 🧪 End-to-End Test Walkthrough – Core LSP Tools
 
