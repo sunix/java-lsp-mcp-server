@@ -28,7 +28,8 @@ When coding in this project, keep this goal in mind:
 |-------------|---------|-------|
 | Java (JDK)  | 25      | Used to compile and run the Quarkus server. Install via [sdkman](https://sdkman.io/). |
 | Maven       | 3.9+    | Maven Wrapper (`./mvnw`) is included. |
-| Eclipse JDT Language Server (jdtls) | Latest | Required at runtime for LSP features (not for unit tests). |
+| Eclipse JDT Language Server (jdtls) | Latest | **Downloaded automatically** on first `startJdtls()` call (requires `tar` and internet). Manual install also supported. |
+| `tar`                               | Any    | Required for the auto-download extraction (standard on Linux/macOS). |
 
 ### Installing Java 25 with sdkman
 
@@ -38,28 +39,49 @@ source "$HOME/.sdkman/bin/sdkman-init.sh"
 sdk install java 25.0.2-tem
 ```
 
-### Installing JDTLS
+### JDTLS Installation
 
-**Option A – Python package** (quickest):
+**Option A – Automatic download (recommended, zero config)**
+
+JDTLS is downloaded and installed automatically the first time `startJdtls()` is called and no local installation is found. The latest release is fetched from Eclipse's milestone server and stored in `~/.local/share/java-lsp-mcp-server/jdtls`.
+
+You can also trigger an explicit install using the `installJdtls()` MCP tool:
+```
+installJdtls()
+→ "JDTLS downloaded and installed to: /home/$USER/.local/share/java-lsp-mcp-server/jdtls"
+```
+
+To pin a specific JDTLS version:
+```properties
+# src/main/resources/application.properties
+jdtls.download.url=https://download.eclipse.org/jdtls/milestones/1.40.0/jdt-language-server-1.40.0-202503201301.tar.gz
+```
+
+To disable automatic download entirely:
+```properties
+jdtls.auto.download=false
+```
+
+**Option B – Python package**:
 ```bash
 pip install jdtls
 # The binary is now on PATH; the home directory is: dirname $(dirname $(which jdtls))
 ```
 
-**Option B – Manual download**:
+**Option C – Manual download**:
 ```bash
 mkdir -p ~/.local/share/jdtls
 curl -L "https://download.eclipse.org/jdtls/milestones/$(curl -s https://download.eclipse.org/jdtls/milestones/ | grep -oP '[\d.]+(?=/)' | sort -V | tail -1)/jdt-language-server-latest.tar.gz" \
   | tar -xz -C ~/.local/share/jdtls
 ```
 
-**Option C – Configure a custom path**:
+**Option D – Configure a custom path** (if installed elsewhere):
 ```properties
 # src/main/resources/application.properties
 jdtls.install.path=/path/to/your/jdtls
 ```
 
-If `jdtls.install.path` is empty, the server automatically searches for JDTLS on `PATH` and in `~/.local/share/jdtls`, `/usr/local/jdtls`, and `/opt/jdtls`.
+JDTLS is resolved in this priority order: managed install directory (`~/.local/share/java-lsp-mcp-server/jdtls`) → `jdtls.install.path` config → system `PATH` → common paths (`~/.local/share/jdtls`, `/usr/local/jdtls`, `/opt/jdtls`).
 
 ---
 
@@ -105,7 +127,10 @@ The repository contains a ready-made Java project in `test-workspace/` (a `Calcu
 2. **Use the MCP tools in order** – call each tool via your MCP client and verify the expected output:
 
    ```
-   startJdtls()
+   installJdtls()           ← optional: explicit install; startJdtls() does this automatically if needed
+   → "JDTLS downloaded and installed to: /home/$USER/.local/share/java-lsp-mcp-server/jdtls"
+
+   startJdtls()             ← auto-downloads JDTLS if not already installed
    → "JDTLS started successfully. PID: <pid>. Use initializeWorkspace(<path>) to open a Java project."
 
    checkJdtls()
@@ -197,9 +222,10 @@ java-lsp-mcp-server/
 
 ### Key classes
 
-- **`MyTool`** – Thin MCP layer. Each `@Tool` method validates pre-conditions, delegates to `JdtlsConnectionService`, and formats the result string for the LLM.
+- **`MyTool`** – Thin MCP layer. Each `@Tool` method validates pre-conditions, delegates to `JdtlsConnectionService`, and formats the result string for the LLM. Exposes: `helloworld`, `installJdtls`, `startJdtls`, `stopJdtls`, `checkJdtls`, `initializeWorkspace`, `getTestWorkspacePath`, `getSymbols`, `getCompletions`, `getDiagnostics`, `formatCode`, `getDefinition`.
 - **`JdtlsConnectionService`** – The core engine:
-  - Resolves the JDTLS installation path.
+  - Resolves the JDTLS installation path (managed dir → `jdtls.install.path` → PATH → common paths).
+  - **Auto-downloads JDTLS** from Eclipse's milestone server on first use (`jdtls.auto.download=true` by default); extracts via `tar`.
   - Manages the JDTLS subprocess lifecycle (`start`, `stop`, liveness check).
   - Maintains the LSP4J launcher and language-server proxy.
   - Performs the LSP initialize/initialized handshake.
