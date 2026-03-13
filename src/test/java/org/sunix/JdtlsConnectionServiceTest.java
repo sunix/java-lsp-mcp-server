@@ -167,24 +167,6 @@ class JdtlsConnectionServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // startJdtls – when JDTLS is not installed
-    // -------------------------------------------------------------------------
-
-    @Test
-    void startJdtlsWhenNotInstalled() throws Exception {
-        // This test verifies graceful failure when JDTLS is not on the system.
-        // If JDTLS happens to be installed the test is skipped.
-        String home = service.findJdtlsHome();
-        org.junit.jupiter.api.Assumptions.assumeTrue(home == null,
-                "JDTLS is installed at " + home + "; skipping 'not installed' test");
-
-        String result = service.startJdtls().get(30, TimeUnit.SECONDS);
-        assertTrue(result.contains("not found") || result.contains("not installed")
-                        || result.contains("JDTLS not found"),
-                "Should report JDTLS not found, got: " + result);
-    }
-
-    // -------------------------------------------------------------------------
     // JDTLS discovery helpers
     // -------------------------------------------------------------------------
 
@@ -252,6 +234,106 @@ class JdtlsConnectionServiceTest {
         String result = service.getDefinition("/any/file.java", 0, 0).get(5, TimeUnit.SECONDS);
         assertTrue(result.contains("not running"),
                 "Should indicate JDTLS is not running, got: " + result);
+    }
+
+    // -------------------------------------------------------------------------
+    // JDTLS auto-download helpers
+    // -------------------------------------------------------------------------
+
+    @Test
+    void getManagedJdtlsDirEndsWithExpectedPath() {
+        String dir = service.getManagedJdtlsDir();
+        assertNotNull(dir);
+        assertTrue(dir.endsWith("java-lsp-mcp-server/jdtls"),
+                "Managed dir should end with 'java-lsp-mcp-server/jdtls', got: " + dir);
+    }
+
+    @Test
+    void parseLatestVersionReturnsHighestVersion() {
+        String html = "<html>"
+                + "<a href=\"1.9.0/\">1.9.0/</a>"
+                + "<a href=\"1.38.0/\">1.38.0/</a>"
+                + "<a href=\"1.40.0/\">1.40.0/</a>"
+                + "<a href=\"1.10.0/\">1.10.0/</a>"
+                + "</html>";
+        assertEquals("1.40.0", service.parseLatestVersion(html));
+    }
+
+    @Test
+    void parseLatestVersionReturnsNullWhenNoVersions() {
+        assertNull(service.parseLatestVersion("<html><body>No versions here</body></html>"));
+    }
+
+    @Test
+    void parseDownloadUrlFindsCorrectTarGz() {
+        String html = "<html>"
+                + "<a href=\"jdt-language-server-1.40.0-202503201301.tar.gz\">"
+                + "jdt-language-server-1.40.0-202503201301.tar.gz</a>"
+                + "</html>";
+        String baseUrl = "https://download.eclipse.org/jdtls/milestones/1.40.0/";
+        String url = service.parseDownloadUrl(html, "1.40.0", baseUrl);
+        assertEquals(baseUrl + "jdt-language-server-1.40.0-202503201301.tar.gz", url);
+    }
+
+    @Test
+    void parseDownloadUrlReturnsNullWhenNotFound() {
+        String html = "<html><body>nothing here</body></html>";
+        assertNull(service.parseDownloadUrl(html, "1.40.0",
+                "https://download.eclipse.org/jdtls/milestones/1.40.0/"));
+    }
+
+    @Test
+    void compareVersionsCorrectOrder() {
+        assertTrue(service.compareVersions("1.40.0", "1.9.0") > 0,
+                "1.40.0 should be greater than 1.9.0");
+        assertTrue(service.compareVersions("1.9.0", "1.40.0") < 0,
+                "1.9.0 should be less than 1.40.0");
+        assertEquals(0, service.compareVersions("1.40.0", "1.40.0"),
+                "Same versions should compare as equal");
+        assertTrue(service.compareVersions("2.0.0", "1.99.99") > 0,
+                "2.0.0 should be greater than 1.99.99");
+    }
+
+    @Test
+    void downloadAndInstallJdtlsReportsAlreadyInstalledWhenPresent() throws Exception {
+        // Create a fake managed installation so the "already installed" branch is hit.
+        String managedDir = service.getManagedJdtlsDir();
+        Path pluginsDir = Path.of(managedDir, "plugins");
+        Path fakeJar = pluginsDir.resolve("org.eclipse.equinox.launcher_1.0.0.jar");
+        Files.createDirectories(pluginsDir);
+        Files.createFile(fakeJar);
+        try {
+            String result = service.downloadAndInstallJdtls().get(10, TimeUnit.SECONDS);
+            assertTrue(result.contains("already installed"),
+                    "Should report already installed, got: " + result);
+        } finally {
+            Files.deleteIfExists(fakeJar);
+            Files.deleteIfExists(pluginsDir);
+            Files.deleteIfExists(Path.of(managedDir));
+            // best-effort cleanup of parent dirs (failure here should not mask test failures)
+            Path parentDir = Path.of(managedDir).getParent();
+            if (parentDir != null) {
+                try {
+                    Files.deleteIfExists(parentDir);
+                } catch (IOException e) {
+                    // Ignore: parent may not be empty if other content exists there
+                }
+            }
+        }
+    }
+
+    @Test
+    void startJdtlsWhenNotInstalledAndAutoDownloadDisabled() throws Exception {
+        // Auto-download is disabled in tests via %test.jdtls.auto.download=false.
+        // Verify that when JDTLS is not present the helpful error message is returned.
+        String home = service.findJdtlsHome();
+        org.junit.jupiter.api.Assumptions.assumeTrue(home == null,
+                "JDTLS is installed at " + home + "; skipping 'not installed' test");
+
+        String result = service.startJdtls().get(30, TimeUnit.SECONDS);
+        assertTrue(result.contains("not found") || result.contains("not installed")
+                        || result.contains("JDTLS not found"),
+                "Should report JDTLS not found when auto-download is disabled, got: " + result);
     }
 
     // -------------------------------------------------------------------------

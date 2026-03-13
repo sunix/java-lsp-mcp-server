@@ -12,6 +12,10 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -25,14 +29,32 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class JdtlsConnectionService {
 
     private static final Logger LOG = Logger.getLogger(JdtlsConnectionService.class.getName());
 
+    private static final String JDTLS_DOWNLOAD_MILESTONES_URL =
+            "https://download.eclipse.org/jdtls/milestones/";
+
     @ConfigProperty(name = "jdtls.install.path", defaultValue = "")
     Optional<String> jdtlsInstallPath;
+
+    /** When true (the default) JDTLS is downloaded automatically if it cannot be found locally. */
+    @ConfigProperty(name = "jdtls.auto.download", defaultValue = "true")
+    boolean autoDownload;
+
+    /**
+     * Optional direct download URL for the JDTLS tar.gz archive.
+     * When set, this URL is used instead of resolving the latest version from Eclipse's
+     * download server.  Example:
+     * {@code jdtls.download.url=https://download.eclipse.org/jdtls/milestones/1.40.0/jdt-language-server-1.40.0-202503201301.tar.gz}
+     */
+    @ConfigProperty(name = "jdtls.download.url", defaultValue = "")
+    Optional<String> jdtlsDownloadUrl;
 
     private LanguageServer languageServer;
     private Process jdtlsProcess;
@@ -72,10 +94,19 @@ public class JdtlsConnectionService {
             try {
                 String jdtlsHome = findJdtlsHome();
                 if (jdtlsHome == null) {
-                    return "JDTLS not found. Please install jdtls and either:\n"
-                            + "  • set 'jdtls.install.path' in application.properties, or\n"
-                            + "  • ensure the 'jdtls' launch script is on your PATH, or\n"
-                            + "  • install to ~/.local/share/jdtls, /usr/local/jdtls, or /opt/jdtls.";
+                    if (autoDownload) {
+                        LOG.info("JDTLS not found locally. Attempting auto-download...");
+                        String downloadResult = doDownloadAndInstall();
+                        LOG.info("Auto-download result: " + downloadResult);
+                        jdtlsHome = findJdtlsHome();
+                    }
+                    if (jdtlsHome == null) {
+                        return "JDTLS not found. Please install jdtls and either:\n"
+                                + "  • set 'jdtls.install.path' in application.properties, or\n"
+                                + "  • ensure the 'jdtls' launch script is on your PATH, or\n"
+                                + "  • install to ~/.local/share/jdtls, /usr/local/jdtls, or /opt/jdtls, or\n"
+                                + "  • use the installJdtls() tool to download it automatically.";
+                    }
                 }
 
                 Path launcherJar = findLauncherJar(jdtlsHome);
@@ -531,10 +562,242 @@ public class JdtlsConnectionService {
     }
 
     // -------------------------------------------------------------------------
+    // JDTLS auto-download / installation
+    // -------------------------------------------------------------------------
+
+    /**
+     * Return the path of the directory managed by this application for storing a
+     * downloaded copy of JDTLS.
+     */
+    String getManagedJdtlsDir() {
+        return System.getProperty("user.home") + "/.local/share/java-lsp-mcp-server/jdtls";
+    }
+
+    /**
+     * Download and install the latest Eclipse JDT Language Server into the managed
+     * directory ({@code ~/.local/share/java-lsp-mcp-server/jdtls}).
+     * <p>
+     * If {@code jdtls.download.url} is set in {@code application.properties} that URL
+     * is used directly; otherwise the latest milestone release is resolved from
+     * Eclipse's download server.
+     */
+    public CompletableFuture<String> downloadAndInstallJdtls() {
+        return CompletableFuture.supplyAsync(this::doDownloadAndInstall);
+    }
+
+    /**
+     * Synchronous implementation of the download-and-install logic so it can be
+     * called from within the already-async {@link #startJdtls()} supplier without
+     * nesting {@link CompletableFuture#get()} calls.
+     */
+    private String doDownloadAndInstall() {
+        try {
+            String managedDir = getManagedJdtlsDir();
+
+            // Already installed?
+            if (new File(managedDir).isDirectory()) {
+                try {
+                    if (findLauncherJar(managedDir) != null) {
+                        return "JDTLS is already installed at: " + managedDir;
+                    }
+                } catch (IOException ignored) {
+                }
+            }
+
+            Files.createDirectories(Path.of(managedDir));
+
+            String downloadUrl;
+            if (jdtlsDownloadUrl.isPresent() && !jdtlsDownloadUrl.get().isBlank()) {
+                downloadUrl = jdtlsDownloadUrl.get();
+            } else {
+                downloadUrl = resolveLatestJdtlsDownloadUrl();
+            }
+
+            if (downloadUrl == null) {
+                return "Failed to determine JDTLS download URL. "
+                        + "Please set 'jdtls.download.url' in application.properties "
+                        + "or install JDTLS manually.";
+            }
+
+            LOG.info("Downloading JDTLS from: " + downloadUrl);
+            Path tmpFile = Files.createTempFile("jdtls-download-", ".tar.gz");
+            try {
+                downloadFile(downloadUrl, tmpFile);
+                LOG.info("Extracting JDTLS to: " + managedDir);
+                extractTarGz(tmpFile, Path.of(managedDir));
+                return "JDTLS downloaded and installed to: " + managedDir;
+            } finally {
+                Files.deleteIfExists(tmpFile);
+            }
+        } catch (Exception e) {
+            LOG.severe("Failed to download JDTLS: " + e.getMessage());
+            return "Failed to download JDTLS: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Fetch the Eclipse JDTLS milestones page, find the highest version, then locate
+     * the {@code .tar.gz} download URL for that version.
+     *
+     * @return the download URL, or {@code null} if it cannot be resolved
+     */
+    String resolveLatestJdtlsDownloadUrl() {
+        try {
+            HttpClient client = HttpClient.newBuilder()
+                    .followRedirects(HttpClient.Redirect.NORMAL)
+                    .build();
+
+            HttpRequest listRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(JDTLS_DOWNLOAD_MILESTONES_URL))
+                    .GET()
+                    .build();
+            HttpResponse<String> listResponse = client.send(listRequest,
+                    HttpResponse.BodyHandlers.ofString());
+
+            String latestVersion = parseLatestVersion(listResponse.body());
+            if (latestVersion == null) {
+                LOG.warning("Could not parse JDTLS version list from: " + JDTLS_DOWNLOAD_MILESTONES_URL);
+                return null;
+            }
+
+            String versionUrl = JDTLS_DOWNLOAD_MILESTONES_URL + latestVersion + "/";
+            HttpRequest versionRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(versionUrl))
+                    .GET()
+                    .build();
+            HttpResponse<String> versionResponse = client.send(versionRequest,
+                    HttpResponse.BodyHandlers.ofString());
+
+            return parseDownloadUrl(versionResponse.body(), latestVersion, versionUrl);
+        } catch (Exception e) {
+            LOG.warning("Failed to resolve latest JDTLS download URL: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Parse the highest JDTLS milestone version from an Eclipse download-page HTML body.
+     * Looks for href attributes of the form {@code href="1.40.0/"}.
+     */
+    String parseLatestVersion(String html) {
+        Pattern pattern = Pattern.compile("href=\"(\\d+\\.\\d+\\.\\d+)/\"");
+        Matcher matcher = pattern.matcher(html);
+        String latest = null;
+        while (matcher.find()) {
+            String version = matcher.group(1);
+            if (latest == null || compareVersions(version, latest) > 0) {
+                latest = version;
+            }
+        }
+        return latest;
+    }
+
+    /**
+     * Parse the {@code .tar.gz} download URL for a specific version from the
+     * version directory listing HTML.
+     *
+     * @param html     the HTML body of the version directory page
+     * @param version  the version string (e.g. {@code "1.40.0"})
+     * @param baseUrl  the base URL of the version directory (including trailing {@code /})
+     * @return the full download URL, or {@code null} if not found
+     */
+    String parseDownloadUrl(String html, String version, String baseUrl) {
+        Pattern pattern = Pattern.compile(
+                "href=\"(jdt-language-server-" + Pattern.quote(version) + "-\\d+\\.tar\\.gz)\"");
+        Matcher matcher = pattern.matcher(html);
+        if (matcher.find()) {
+            return baseUrl + matcher.group(1);
+        }
+        return null;
+    }
+
+    /**
+     * Compare two dot-separated version strings (e.g. {@code "1.40.0"} vs {@code "1.9.0"}).
+     * Returns 0 if either argument is {@code null} or cannot be parsed.
+     *
+     * @return positive if {@code a > b}, negative if {@code a < b}, 0 if equal or unparseable
+     */
+    int compareVersions(String a, String b) {
+        if (a == null || b == null) {
+            return 0;
+        }
+        String[] partsA = a.split("\\.");
+        String[] partsB = b.split("\\.");
+        for (int i = 0; i < Math.min(partsA.length, partsB.length); i++) {
+            try {
+                int cmp = Integer.compare(Integer.parseInt(partsA[i]), Integer.parseInt(partsB[i]));
+                if (cmp != 0) {
+                    return cmp;
+                }
+            } catch (NumberFormatException e) {
+                return 0;
+            }
+        }
+        return Integer.compare(partsA.length, partsB.length);
+    }
+
+    /**
+     * Download the file at {@code url} and write it to {@code targetPath}.
+     *
+     * @throws IOException if the server returns a non-2xx HTTP status code or a network error occurs
+     */
+    void downloadFile(String url, Path targetPath) throws IOException, InterruptedException {
+        HttpClient client = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .build();
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .GET()
+                .build();
+        HttpResponse<Path> response = client.send(request, HttpResponse.BodyHandlers.ofFile(targetPath));
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            throw new IOException(
+                    "HTTP " + response.statusCode() + " downloading JDTLS from: " + url);
+        }
+    }
+
+    /**
+     * Extract a gzip-compressed tar archive into {@code targetDir} using the system
+     * {@code tar} command (must be on the PATH; available on Linux and macOS).
+     *
+     * @throws IOException          if the extraction fails or times out
+     * @throws InterruptedException if the current thread is interrupted while waiting
+     */
+    void extractTarGz(Path archivePath, Path targetDir) throws IOException, InterruptedException {
+        ProcessBuilder pb = new ProcessBuilder(
+                "tar", "-xzf", archivePath.toAbsolutePath().toString(),
+                "-C", targetDir.toAbsolutePath().toString());
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        String output = new String(p.getInputStream().readAllBytes());
+        boolean finished = p.waitFor(300, TimeUnit.SECONDS);
+        if (!finished) {
+            p.destroyForcibly();
+            throw new IOException("tar extraction timed out after 300 s");
+        }
+        if (p.exitValue() != 0) {
+            throw new IOException(
+                    "tar extraction failed (exit code " + p.exitValue() + "): " + output);
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // JDTLS discovery helpers
     // -------------------------------------------------------------------------
 
     String findJdtlsHome() {
+        // 0. Managed directory (auto-downloaded by this server)
+        String managedDir = getManagedJdtlsDir();
+        if (new File(managedDir).isDirectory()) {
+            try {
+                if (findLauncherJar(managedDir) != null) {
+                    return managedDir;
+                }
+            } catch (IOException e) {
+                LOG.warning("Error checking managed JDTLS directory: " + e.getMessage());
+            }
+        }
+
         // 1. Explicitly configured path
         if (jdtlsInstallPath.isPresent() && !jdtlsInstallPath.get().isBlank()) {
             String path = jdtlsInstallPath.get();
