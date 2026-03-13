@@ -4,6 +4,7 @@ import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.eclipse.lsp4j.*;
 import org.eclipse.lsp4j.jsonrpc.Launcher;
+import org.eclipse.lsp4j.jsonrpc.messages.Either;
 import org.eclipse.lsp4j.launch.LSPLauncher;
 import org.eclipse.lsp4j.services.LanguageClient;
 import org.eclipse.lsp4j.services.LanguageServer;
@@ -16,8 +17,11 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
@@ -35,6 +39,15 @@ public class JdtlsConnectionService {
     private Future<?> listenerFuture;
     private boolean connected = false;
     private String currentWorkspaceRoot;
+
+    /** Tracks URIs of files currently open in JDTLS (via textDocument/didOpen). */
+    private final Set<String> openDocuments = ConcurrentHashMap.newKeySet();
+
+    /** Monotonically-increasing document version counter, keyed by file URI. */
+    private final Map<String, Integer> documentVersions = new ConcurrentHashMap<>();
+
+    /** Diagnostics pushed by JDTLS via publishDiagnostics, keyed by file URI. */
+    private final Map<String, List<Diagnostic>> diagnosticsCache = new ConcurrentHashMap<>();
 
     public boolean isConnected() {
         return connected && jdtlsProcess != null && jdtlsProcess.isAlive();
@@ -97,7 +110,7 @@ public class JdtlsConnectionService {
                 stderrReader.start();
 
                 // Connect via LSP4J over the process stdin/stdout streams
-                SimpleLanguageClient client = new SimpleLanguageClient();
+                SimpleLanguageClient client = new SimpleLanguageClient(diagnosticsCache);
                 Launcher<LanguageServer> launcher = new LSPLauncher.Builder<LanguageServer>()
                         .setLocalService(client)
                         .setRemoteInterface(LanguageServer.class)
@@ -149,6 +162,9 @@ public class JdtlsConnectionService {
             jdtlsProcess = null;
             listenerFuture = null;
             currentWorkspaceRoot = null;
+            openDocuments.clear();
+            documentVersions.clear();
+            diagnosticsCache.clear();
 
             return "JDTLS stopped. PID was: " + pid;
         });
@@ -213,6 +229,227 @@ public class JdtlsConnectionService {
     }
 
     // -------------------------------------------------------------------------
+    // Core LSP tools
+    // -------------------------------------------------------------------------
+
+    /**
+     * Extract document symbols (classes, methods, fields, etc.) from a Java file.
+     * The file is opened in JDTLS via {@code textDocument/didOpen} if not already open.
+     */
+    public CompletableFuture<String> getSymbols(String filePath) {
+        if (!isConnected()) {
+            return CompletableFuture.completedFuture(
+                    "JDTLS is not running. Use startJdtls() and initializeWorkspace() first.");
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                File file = new File(filePath);
+                if (!file.exists()) {
+                    return "File not found: " + filePath;
+                }
+                ensureFileOpen(filePath);
+                String uri = file.toURI().toString();
+                DocumentSymbolParams params = new DocumentSymbolParams(new TextDocumentIdentifier(uri));
+                List<Either<SymbolInformation, DocumentSymbol>> symbols =
+                        languageServer.getTextDocumentService().documentSymbol(params)
+                                .get(10, TimeUnit.SECONDS);
+                if (symbols == null || symbols.isEmpty()) {
+                    return "No symbols found in: " + filePath;
+                }
+                StringBuilder sb = new StringBuilder("Symbols in " + filePath + ":\n");
+                for (Either<SymbolInformation, DocumentSymbol> either : symbols) {
+                    if (either.isRight()) {
+                        DocumentSymbol sym = either.getRight();
+                        sb.append("  ").append(sym.getKind()).append(" ").append(sym.getName())
+                                .append(" [line ").append(sym.getRange().getStart().getLine() + 1).append("]\n");
+                    } else {
+                        SymbolInformation sym = either.getLeft();
+                        sb.append("  ").append(sym.getKind()).append(" ").append(sym.getName()).append("\n");
+                    }
+                }
+                return sb.toString();
+            } catch (Exception e) {
+                return "Error getting symbols: " + e.getMessage();
+            }
+        });
+    }
+
+    /**
+     * Return code-completion suggestions at the given 0-based line/column position.
+     */
+    public CompletableFuture<String> getCompletions(String filePath, int line, int column) {
+        if (!isConnected()) {
+            return CompletableFuture.completedFuture(
+                    "JDTLS is not running. Use startJdtls() and initializeWorkspace() first.");
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                File file = new File(filePath);
+                if (!file.exists()) {
+                    return "File not found: " + filePath;
+                }
+                ensureFileOpen(filePath);
+                String uri = file.toURI().toString();
+                CompletionParams params = new CompletionParams(
+                        new TextDocumentIdentifier(uri), new Position(line, column));
+                Either<List<CompletionItem>, CompletionList> result =
+                        languageServer.getTextDocumentService().completion(params)
+                                .get(10, TimeUnit.SECONDS);
+                List<CompletionItem> items = result.isLeft()
+                        ? result.getLeft()
+                        : result.getRight().getItems();
+                if (items == null || items.isEmpty()) {
+                    return "No completions at line " + (line + 1) + ", col " + (column + 1)
+                            + " in: " + filePath;
+                }
+                StringBuilder sb = new StringBuilder(
+                        "Completions at line " + (line + 1) + ", col " + (column + 1)
+                                + " in " + filePath + ":\n");
+                items.stream().limit(20).forEach(item ->
+                        sb.append("  ").append(item.getLabel())
+                                .append(item.getDetail() != null ? " – " + item.getDetail() : "")
+                                .append("\n"));
+                if (items.size() > 20) {
+                    sb.append("  ... and ").append(items.size() - 20).append(" more\n");
+                }
+                return sb.toString();
+            } catch (Exception e) {
+                return "Error getting completions: " + e.getMessage();
+            }
+        });
+    }
+
+    /**
+     * Return compilation errors and warnings for a Java file.
+     * Opens the file in JDTLS (if not already open) and waits up to 10 s for
+     * diagnostics to be pushed back via {@code publishDiagnostics}.
+     */
+    public CompletableFuture<String> getDiagnostics(String filePath) {
+        if (!isConnected()) {
+            return CompletableFuture.completedFuture(
+                    "JDTLS is not running. Use startJdtls() and initializeWorkspace() first.");
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                File file = new File(filePath);
+                if (!file.exists()) {
+                    return "File not found: " + filePath;
+                }
+                String uri = file.toURI().toString();
+                ensureFileOpen(filePath);
+                // Wait up to 10 s for JDTLS to push diagnostics
+                long deadline = System.currentTimeMillis() + 10_000;
+                while (!diagnosticsCache.containsKey(uri) && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(200);
+                }
+                List<Diagnostic> diags = diagnosticsCache.getOrDefault(uri, List.of());
+                if (diags.isEmpty()) {
+                    return "No diagnostics for: " + filePath;
+                }
+                StringBuilder sb = new StringBuilder("Diagnostics for " + filePath + ":\n");
+                for (Diagnostic diag : diags) {
+                    sb.append("  [").append(diag.getSeverity()).append("] line ")
+                            .append(diag.getRange().getStart().getLine() + 1)
+                            .append(": ").append(diag.getMessage()).append("\n");
+                }
+                return sb.toString();
+            } catch (Exception e) {
+                return "Error getting diagnostics: " + e.getMessage();
+            }
+        });
+    }
+
+    /**
+     * Format a Java source file using JDTLS and write the result back to disk.
+     */
+    public CompletableFuture<String> formatCode(String filePath) {
+        if (!isConnected()) {
+            return CompletableFuture.completedFuture(
+                    "JDTLS is not running. Use startJdtls() and initializeWorkspace() first.");
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                File file = new File(filePath);
+                if (!file.exists()) {
+                    return "File not found: " + filePath;
+                }
+                ensureFileOpen(filePath);
+                String uri = file.toURI().toString();
+                FormattingOptions options = new FormattingOptions();
+                options.setTabSize(4);
+                options.setInsertSpaces(true);
+                DocumentFormattingParams params = new DocumentFormattingParams(
+                        new TextDocumentIdentifier(uri), options);
+                List<? extends TextEdit> edits = languageServer.getTextDocumentService()
+                        .formatting(params).get(10, TimeUnit.SECONDS);
+                if (edits == null || edits.isEmpty()) {
+                    return "No formatting changes needed for: " + filePath;
+                }
+                String original = Files.readString(file.toPath());
+                String formatted = applyTextEdits(original, edits);
+                Files.writeString(file.toPath(), formatted);
+                // Notify JDTLS of the updated content with an incremented version
+                int nextVersion = documentVersions.merge(uri, 1, Integer::sum);
+                VersionedTextDocumentIdentifier versionedId =
+                        new VersionedTextDocumentIdentifier(uri, nextVersion);
+                languageServer.getTextDocumentService().didChange(
+                        new DidChangeTextDocumentParams(versionedId,
+                                List.of(new TextDocumentContentChangeEvent(formatted))));
+                return "File formatted: " + filePath + " (" + edits.size() + " edit(s) applied)";
+            } catch (Exception e) {
+                return "Error formatting code: " + e.getMessage();
+            }
+        });
+    }
+
+    /**
+     * Return the definition location for a symbol at the given 0-based line/column.
+     */
+    public CompletableFuture<String> getDefinition(String filePath, int line, int column) {
+        if (!isConnected()) {
+            return CompletableFuture.completedFuture(
+                    "JDTLS is not running. Use startJdtls() and initializeWorkspace() first.");
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                File file = new File(filePath);
+                if (!file.exists()) {
+                    return "File not found: " + filePath;
+                }
+                ensureFileOpen(filePath);
+                String uri = file.toURI().toString();
+                DefinitionParams params = new DefinitionParams(
+                        new TextDocumentIdentifier(uri), new Position(line, column));
+                Either<List<? extends Location>, List<? extends LocationLink>> result =
+                        languageServer.getTextDocumentService().definition(params)
+                                .get(10, TimeUnit.SECONDS);
+                List<? extends Location> locations = result.isLeft() ? result.getLeft() : List.of();
+                List<? extends LocationLink> links = result.isRight() ? result.getRight() : List.of();
+                if (locations.isEmpty() && links.isEmpty()) {
+                    return "No definition found at line " + (line + 1) + ", col " + (column + 1)
+                            + " in: " + filePath;
+                }
+                StringBuilder sb = new StringBuilder(
+                        "Definition at line " + (line + 1) + ", col " + (column + 1)
+                                + " in " + filePath + ":\n");
+                for (Location loc : locations) {
+                    sb.append("  ").append(loc.getUri())
+                            .append(" line ").append(loc.getRange().getStart().getLine() + 1)
+                            .append("\n");
+                }
+                for (LocationLink link : links) {
+                    sb.append("  ").append(link.getTargetUri())
+                            .append(" line ").append(link.getTargetSelectionRange().getStart().getLine() + 1)
+                            .append("\n");
+                }
+                return sb.toString();
+            } catch (Exception e) {
+                return "Error getting definition: " + e.getMessage();
+            }
+        });
+    }
+
+    // -------------------------------------------------------------------------
     // LSP protocol helpers
     // -------------------------------------------------------------------------
 
@@ -235,6 +472,62 @@ public class JdtlsConnectionService {
                     return "LSP handshake complete. Text document sync: " + caps.getTextDocumentSync();
                 })
                 .exceptionally(e -> "LSP initialization error: " + e.getMessage());
+    }
+
+    /**
+     * Open a file in JDTLS via {@code textDocument/didOpen} if it has not been opened yet.
+     * Subsequent LSP requests (symbols, completions, definition, formatting) require
+     * the file to be open first.
+     */
+    private void ensureFileOpen(String filePath) throws IOException {
+        String uri = new File(filePath).toURI().toString();
+        if (openDocuments.add(uri)) {
+            String content = Files.readString(Paths.get(filePath));
+            TextDocumentItem textDoc = new TextDocumentItem(uri, "java", 1, content);
+            languageServer.getTextDocumentService().didOpen(new DidOpenTextDocumentParams(textDoc));
+            documentVersions.put(uri, 1);
+        }
+    }
+
+    /**
+     * Apply a list of {@link TextEdit}s (as returned by the LSP formatting request) to
+     * {@code content}. Edits are applied in reverse document order so that earlier
+     * character offsets remain valid after each replacement.
+     */
+    String applyTextEdits(String content, List<? extends TextEdit> edits) {
+        List<TextEdit> sorted = new ArrayList<>(edits);
+        sorted.sort((a, b) -> {
+            int lineCmp = Integer.compare(
+                    b.getRange().getStart().getLine(),
+                    a.getRange().getStart().getLine());
+            if (lineCmp != 0) {
+                return lineCmp;
+            }
+            return Integer.compare(
+                    b.getRange().getStart().getCharacter(),
+                    a.getRange().getStart().getCharacter());
+        });
+        List<Integer> lineOffsets = computeLineOffsets(content);
+        StringBuilder result = new StringBuilder(content);
+        for (TextEdit edit : sorted) {
+            int start = lineOffsets.get(edit.getRange().getStart().getLine())
+                    + edit.getRange().getStart().getCharacter();
+            int end = lineOffsets.get(edit.getRange().getEnd().getLine())
+                    + edit.getRange().getEnd().getCharacter();
+            result.replace(start, end, edit.getNewText());
+        }
+        return result.toString();
+    }
+
+    private List<Integer> computeLineOffsets(String content) {
+        List<Integer> offsets = new ArrayList<>();
+        offsets.add(0);
+        for (int i = 0; i < content.length(); i++) {
+            if (content.charAt(i) == '\n') {
+                offsets.add(i + 1);
+            }
+        }
+        return offsets;
     }
 
     // -------------------------------------------------------------------------
@@ -351,6 +644,12 @@ public class JdtlsConnectionService {
 
     private static class SimpleLanguageClient implements LanguageClient {
 
+        private final Map<String, List<Diagnostic>> diagnosticsCache;
+
+        SimpleLanguageClient(Map<String, List<Diagnostic>> diagnosticsCache) {
+            this.diagnosticsCache = diagnosticsCache;
+        }
+
         @Override
         public void telemetryEvent(Object object) {
             // no-op
@@ -358,6 +657,7 @@ public class JdtlsConnectionService {
 
         @Override
         public void publishDiagnostics(PublishDiagnosticsParams diagnostics) {
+            diagnosticsCache.put(diagnostics.getUri(), diagnostics.getDiagnostics());
             LOG.info("Diagnostics for " + diagnostics.getUri() + ": "
                     + diagnostics.getDiagnostics().size() + " issue(s)");
         }
