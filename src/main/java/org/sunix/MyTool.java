@@ -21,14 +21,28 @@ public class MyTool {
     }
 
     @Tool(description = "Start the Eclipse JDT Language Server (JDTLS) process. "
+            + "If JDTLS is not installed, it is downloaded automatically from Eclipse's download server "
+            + "(controlled by the 'jdtls.auto.download' configuration property). "
             + "The JDTLS home directory is resolved from the 'jdtls.install.path' "
-            + "configuration property, the system PATH, or common installation locations "
-            + "(~/.local/share/jdtls, /usr/local/jdtls, /opt/jdtls).")
+            + "configuration property, the managed install directory, the system PATH, "
+            + "or common installation locations (~/.local/share/jdtls, /usr/local/jdtls, /opt/jdtls).")
     public String startJdtls() {
         try {
-            return jdtlsService.startJdtls().get(30, TimeUnit.SECONDS);
+            return jdtlsService.startJdtls().get(300, TimeUnit.SECONDS);
         } catch (Exception e) {
             return "Error starting JDTLS: " + e.getMessage();
+        }
+    }
+
+    @Tool(description = "Download and install the Eclipse JDT Language Server (JDTLS) automatically. "
+            + "JDTLS is installed to ~/.local/share/java-lsp-mcp-server/jdtls. "
+            + "This only needs to be done once; startJdtls() also triggers auto-download when needed. "
+            + "Set 'jdtls.download.url' in application.properties to pin a specific version.")
+    public String installJdtls() {
+        try {
+            return jdtlsService.downloadAndInstallJdtls().get(300, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return "Error installing JDTLS: " + e.getMessage();
         }
     }
 
